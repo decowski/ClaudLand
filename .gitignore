@@ -1,0 +1,17 @@
+# private KamLAND inputs (PMT table, run list, Huffman tables, calibration constants) -- see claudland.toml
+private/
+# derived files: hit caches, fit tables, calibration JSONs, logs, plots
+cache/
+*.npz
+*.npy
+*.log
+*.png
+!examples/*.png
+# build artefacts
+__pycache__/
+*.pyc
+*.egg-info/
+*.dylib
+*.so
+build/
+dist/

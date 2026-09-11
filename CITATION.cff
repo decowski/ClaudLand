@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use ClaudLand in your work, please cite it as below."
+type: software
+title: "ClaudLand: a Python reconstruction framework for KamLAND raw data"
+abstract: >-
+  Reads KamLAND Serial Format raw-data files (.sf/.sfz), decompresses the ATWD
+  waveforms, extracts hit times and charges, fits event vertices with window and
+  maximum-likelihood (time and charge) fitters, estimates the visible energy and
+  reconstructs muon tracks with a joint first-light-time and charge-pattern fit.
+authors:
+  - family-names: Decowski
+    given-names: M. P.
+    affiliation: "Nikhef and University of Amsterdam"
+  - name: "Claude (Anthropic)"
+    website: "https://www.anthropic.com/claude"
+version: 0.1.0
+date-released: 2026-09-11
+license: BSD-3-Clause
+repository-code: "https://github.com/decowski/ClaudLand"
+keywords:
+  - KamLAND
+  - neutrino
+  - liquid scintillator
+  - event reconstruction
+  - muon tracking

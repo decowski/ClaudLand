@@ -1,0 +1,21 @@
+# claudland.toml -- locations of the inputs that are private to the KamLAND collaboration.
+#
+# The public package (claudland/) contains no collaboration data.  Everything it needs
+# from KamLAND -- the PMT coordinate table, the run list, the waveform-compression
+# code tables, the raw-data files and the calibration constants derived from them --
+# is looked up through this file, which claudland.config finds as
+#   $CLAUDLAND_CONFIG, ./claudland.toml (or in a parent directory), <repo>/claudland.toml,
+#   ~/.config/claudland/claudland.toml
+# Relative paths are resolved from the directory that holds this file.
+
+[paths]
+private_dir = "private"                          # git-ignored directory for the files below
+pmt_table = "private/pmt_xyz.dat"                # cable  x  y  z (cm); Kat/src/pmt_xyz.cc
+run_info = "private/run-info.table"              # run list with start time, duration, grade, comment
+huffman_tables = "private/huffman_tables.json"   # Huffman tables of the .sfz waveform compression (WFComp/trees.hh)
+data_dir = "../Run"                              # raw .sf / .sfz files (searched recursively)
+cache_dir = "cache"                              # derived files: hit caches, fit tables, plots
+
+[calibration]
+tq = "cache/calib_center.json"                   # default TQ calibration (bin widths, Q0, T0, light yields)
+time_pdf = "cache/timepdf.npz"                   # default time PDFs for the likelihood vertex fitters
