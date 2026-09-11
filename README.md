@@ -2,11 +2,7 @@
 
 A Python (numpy) toolkit, with one small optional C helper, that reads KamLAND *Serial Format* raw-data files
 (`.sf` / `.sfz`), decompresses the ATWD waveforms, extracts hit times and charges,
-fits the event vertex, estimates the visible energy and reconstructs muon tracks.  The name
-is a nod to the Claude model that wrote it together with M.P. Decowski.  It was reverse-engineered
-from the collaboration's C++ code (`SF/`, `WFComp/`, `Kat/`, `AKat/`) and the PhD
-theses in `../Thesis/` (Detwiler 2005 for the reconstruction algorithms) and
-validated on the March 2003 ⁶⁰Co z-scan runs in `../Run/co60-zscan/`.
+fits the event vertex, estimates the visible energy and reconstructs muon tracks.  
 
 ```
 ClaudLand/
@@ -124,8 +120,7 @@ and `cache/` are git-ignored, so a clone of the repository needs the three
 private files copied in and `data_dir` pointed at the data.
 
 Derived quantities in this README and the plots in `examples/` come from
-KamLAND data (calibration runs 2270–2295 of March 2003 and physics run 1467 of
-October 2002); check with the collaboration before making them public.
+KamLAND data.
 
 ## Detector geometry conventions
 
@@ -133,9 +128,7 @@ October 2002); check with the collaboration before making them public.
 `Kat/src/pmt_xyz.cc`): 2126 cables, x y z in cm, inner tubes on the 850 cm
 stainless-steel sphere they are bolted to.  The photocathode / first dynode,
 where the photo-electron is produced and where the light path effectively
-ends, is ~20 cm further in, which is the origin of the 830/850 rescaling in
-Kat's `KPmtTable`; `PMTTable.load(radius_scale=830/850)` applies the same
-shift (inner tubes only).  All inner tubes are 20-inch Hamamatsu envelopes:
+ends.  All inner tubes are 20-inch Hamamatsu envelopes:
 the "17-inch" tubes (cables 0–1324) are the fast-timing version with the
 photocathode masked at the edges to a 17-inch equivalent area, the "20-inch"
 tubes (1325–1878) use the full photocathode.  The two photocathode areas
