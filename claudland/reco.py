@@ -120,11 +120,18 @@ class RecoEvent:
 class EventReconstructor:
     """Reconstruct the physics events of one ``.sfz`` (or ``.sf``) file."""
 
-    def __init__(self, path: str, pmts: Optional[PMTTable] = None, calib: Optional[TQCalibration] = None,
+    def __init__(self, path, pmts: Optional[PMTTable] = None, calib: Optional[TQCalibration] = None,
                  vertex: Optional[VertexFitter] = None, energy: Optional[EnergyEstimator] = None,
                  gains: Sequence[int] = (0, 1, 2), time_key: str = "t_cfd", min_height: float = 5.0,
                  verbose: bool = True):
-        self.path = os.fspath(path)
+        # *path* may be one file or the sequence of files of a run (run_XXXXXX_*_000001.sf, _000002.sf, ...):
+        # the calibration block (pedestal / clock events, RunHeader) is only in the first file, so
+        # prepare() reads that one and physics_events() continues through the others.
+        paths = [path] if isinstance(path, (str, os.PathLike)) else list(path)
+        if not paths:
+            raise ValueError("no input file")
+        self.paths = [os.fspath(p) for p in paths]
+        self.path = self.paths[0]
         self.reader = SFReader(self.path)
         self.pmts = pmts or PMTTable.load()
         self.calib = calib or TQCalibration()
@@ -281,6 +288,7 @@ class EventReconstructor:
         if not self._prepared:
             self.prepare()
         rd = self.reader
+        self.current_path = self.path          #: file the events currently come from
         offsets = rd.build_index()
         i0 = self.first_physics_index if start is None else start
         n = 0
@@ -293,6 +301,21 @@ class EventReconstructor:
             n += 1
             if max_events is not None and n >= max_events:
                 return
+        # continuation files of the same run (no calibration block; sequential read)
+        for path in self.paths[1:]:
+            self.log(f"continuing with {os.path.basename(path)}")
+            self.current_path = path
+            with SFReader(path) as more:
+                for ev in more:
+                    if "Header" not in ev:
+                        continue
+                    h = decode_header(ev["Header"])
+                    if not (h.is_physics and "HitHeader" in ev):
+                        continue
+                    yield ev
+                    n += 1
+                    if max_events is not None and n >= max_events:
+                        return
 
     def run(self, max_events: Optional[int] = None, start: Optional[int] = None,
             keep_hits: bool = False, progress_every: int = 500) -> np.ndarray:

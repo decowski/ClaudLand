@@ -28,7 +28,7 @@ from claudland.calib import TQCalibration
 from claudland.geometry import PMTTable, N_ID
 from claudland.vertex import VertexFitter
 from claudland.vertex_ml import MLVertexFitter, ChargeTimeVertexFitter
-from claudland.zscan import load_cache, hit_times, hit_charges, TimePDF
+from claudland.zscan import load_cache, hit_times, hit_charges, TimePDF, source_peak_nhit, peak_fit
 from claudland.energy import EnergyEstimator
 
 RES_DTYPE = np.dtype([("run", "i4"), ("ztrue", "f4"), ("ev", "i4"), ("nhit", "i4"), ("algo", "U1"),
@@ -50,8 +50,8 @@ def tune_single_speed(files, calib, pmts, n_events=80, speeds=np.arange(16.0, 20
         if abs(ztrue) > max_z:
             continue
         nh = c["events"]["nhit"]
-        peak = np.median(nh[nh > 0.5 * np.percentile(nh, 90)])
-        good = np.flatnonzero((nh > 0.75 * peak) & (nh < 1.25 * peak))[:n_events]
+        peak = source_peak_nhit(nh)
+        good = np.flatnonzero((nh > 0.8 * peak) & (nh < 1.2 * peak))[:n_events]
         t = hit_times(c, calib); q = hit_charges(c, calib); h = c["hits"]
         base = h["primary"] & (h["cable"] < N_ID) & np.isfinite(h["t_cfd"])
         evs = [(h["cable"][m], t[m], q[m]) for m in (base & (h["ev"] == e) for e in good)]
@@ -113,8 +113,8 @@ def main():
         c = load_cache(f)
         run = int(c["run"]); ztrue = float(c["source_z_cm"])
         nh = c["events"]["nhit"]
-        peak = np.median(nh[nh > 0.5 * np.percentile(nh, 90)])
-        good = np.flatnonzero((nh > 0.75 * peak) & (nh < 1.25 * peak))[:args.events]
+        peak = source_peak_nhit(nh)
+        good = np.flatnonzero((nh > 0.8 * peak) & (nh < 1.2 * peak))[:args.events]
         t = hit_times(c, calib); q = hit_charges(c, calib)
         h = c["hits"]
         base = h["primary"] & (h["cable"] < N_ID) & np.isfinite(h["t_cfd"])
@@ -159,8 +159,9 @@ def main():
     tab = np.array(rows, dtype=RES_DTYPE)
     np.save(args.output + ".npy", tab)
     # summary table
-    print("\nbias (median z - true z) and robust sigma [cm]; rho = sqrt(x^2+y^2) median")
-    hdr = f"{'run':>5s} {'z':>6s} " + " ".join(f"{a+'_bias':>7s} {a+'_sig':>6s} {a+'_rho':>6s} {a+'_sx':>5s}" for a in args.algos)
+    print("\nGaussian + flat-background fit of the reconstructed z: bias = peak - true z, sig = Gaussian sigma [cm];")
+    print("rho = median sqrt(x^2+y^2) and sx = Gaussian sigma of x for events within 3 sigma of the z peak; bkg = background fraction within 3 sigma")
+    hdr = f"{'run':>5s} {'z':>6s} " + " ".join(f"{a+'_bias':>7s} {a+'_sig':>6s} {a+'_rho':>6s} {a+'_sx':>5s} {a+'_bkg':>5s}" for a in args.algos)
     print(hdr)
     summ = {a: [] for a in args.algos}
     for run in np.unique(tab["run"]):
@@ -168,12 +169,16 @@ def main():
         for a in args.algos:
             m = (tab["run"] == run) & (tab["algo"] == a) & tab["ok"]
             if m.sum() < 5:
-                line += f"{'-':>7s} {'-':>6s} {'-':>6s} {'-':>5s} "
+                line += f"{'-':>7s} {'-':>6s} {'-':>6s} {'-':>5s} {'-':>5s} "
                 continue
             z = tab["z"][m]; x = tab["x"][m]; y = tab["y"][m]
-            bias = np.median(z) - tab["ztrue"][m][0]
-            summ[a].append((tab["ztrue"][m][0], bias, robust_sigma(z), np.median(np.hypot(x, y)), robust_sigma(x)))
-            line += f"{bias:+7.1f} {robust_sigma(z):6.1f} {np.median(np.hypot(x, y)):6.1f} {robust_sigma(x):5.1f} "
+            pf = peak_fit(z)
+            bias = pf["mu"] - tab["ztrue"][m][0]
+            near = np.abs(z - pf["mu"]) <= 3 * pf["sigma"]
+            sx = peak_fit(x[near])["sigma"] if near.sum() >= 10 else np.nan
+            rho = float(np.median(np.hypot(x[near], y[near]))) if near.any() else np.nan
+            summ[a].append((tab["ztrue"][m][0], bias, pf["sigma"], rho, sx, pf["bkg_frac"]))
+            line += f"{bias:+7.1f} {pf['sigma']:6.1f} {rho:6.1f} {sx:5.1f} {100 * pf['bkg_frac']:4.0f}% "
         print(line)
     print()
     for a in args.algos:
@@ -185,12 +190,18 @@ def main():
     # energy versus position (last algorithm)
     a_e = args.algos[-1]
     esum = []
-    print(f"\nenergy with the vertex of algo {a_e} (median over source events; 60Co = 2.506 MeV):")
+    e_src = float(calib.meta.get("source_energy_mev", 2.506))
+    print(f"\nenergy with the vertex of algo {a_e} (median over source-peak events; source = {e_src:.3f} MeV; sig = robust sigma / median):")
     print(f"{'run':>5s} {'z':>6s} {'E_hit':>7s} {'E_chg':>7s} {'sig_hit%':>8s} {'sig_chg%':>8s}")
     for run in np.unique(tab["run"]):
         m = (tab["run"] == run) & (tab["algo"] == a_e) & tab["ok"] & np.isfinite(tab["e_hit"])
         if m.sum() < 5:
             continue
+        # energies of the events in the source peak (within 3 sigma of the fitted z peak, rho < 3 sigma)
+        pf = peak_fit(tab["z"][m])
+        near = (np.abs(tab["z"][m] - pf["mu"]) <= 3 * pf["sigma"]) & (np.hypot(tab["x"][m], tab["y"][m]) <= 3 * pf["sigma"])
+        if near.sum() >= 5:
+            m = np.flatnonzero(m)[near]
         eh = tab["e_hit"][m]; ec = tab["e_charge"][m]
         esum.append((tab["ztrue"][m][0], np.median(eh), np.median(ec), robust_sigma(eh) / np.median(eh), robust_sigma(ec) / np.median(ec)))
         print(f"{run:5d} {tab['ztrue'][m][0]:+6.0f} {np.median(eh):7.3f} {np.median(ec):7.3f} {100 * esum[-1][3]:8.1f} {100 * esum[-1][4]:8.1f}")
@@ -220,16 +231,16 @@ def main():
             axs[1].plot(s[o, 0], s[o, 4], "s--", color=colors[a], alpha=0.6, label=labels[a] + " (x)")
             axs[2].plot(s[o, 0], s[o, 3], "o-", color=colors[a], label=labels[a])
         axs[0].axhline(0, color="k", lw=0.5); axs[0].set_ylabel("z bias [cm]"); axs[0].set_ylim(-60, 60)
-        axs[1].set_ylabel("robust sigma [cm]"); axs[1].set_ylim(0, 40)
+        axs[1].set_ylabel("Gaussian sigma [cm]"); axs[1].set_ylim(0, 40)
         axs[2].set_ylabel("median rho [cm]"); axs[2].set_ylim(0, 60)
         if len(esum):
             o = np.argsort(esum[:, 0])
             axs[3].plot(esum[o, 0], esum[o, 1], "o-", color="C3", label=f"E_hit (algo {a_e}{', joint fit' if a_e in 'DE' else ''})")
             axs[3].plot(esum[o, 0], esum[o, 2], "s--", color="C0", label="E_charge")
-            axs[3].axhline(2.506, color="k", lw=0.5); axs[3].set_ylim(2.0, 3.0); axs[3].set_ylabel("median energy [MeV]")
+            axs[3].axhline(e_src, color="k", lw=0.5); axs[3].set_ylim(0.8 * e_src, 1.2 * e_src); axs[3].set_ylabel("median energy [MeV]")
         for ax in axs:
             ax.set_xlabel("source z [cm]"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
-        fig.suptitle("60Co z-scan (March 2003): vertex reconstruction vs. source position")
+        fig.suptitle(f"{calib.meta.get('source_run_type', 'source')} z-scan: vertex reconstruction vs. source position")
         fig.tight_layout()
         fig.savefig(args.output + ".png", dpi=110)
         print("plot:", args.output + ".png")

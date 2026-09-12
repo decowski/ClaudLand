@@ -25,7 +25,8 @@ from .geometry import PMTTable, N_ID, N_ID17, BALLOON_RADIUS_CM
 from .vertex import path_lengths
 
 __all__ = ["load_cache", "hit_times", "hit_charges", "calibrate_center", "calibrate_light_yield",
-           "fit_velocities", "TimePDF", "build_time_pdf", "event_time", "residuals_fixed_vertex"]
+           "fit_velocities", "TimePDF", "build_time_pdf", "event_time", "residuals_fixed_vertex",
+           "source_peak_nhit", "source_window", "select_source_events", "filter_cache", "peak_fit"]
 
 Q_EDGES = np.array([0.3, 1.5, 3.0, 6.0, np.inf])        # p.e. bins of the time PDF
 D_EDGES = np.array([0.0, 400.0, 650.0, 900.0, np.inf])  # cm bins of the time PDF
@@ -35,6 +36,133 @@ def load_cache(path: str) -> Dict[str, np.ndarray]:
     """Load a hit cache written by ``scripts/extract_hits.py`` (events, hits, bin widths, ...)."""
     d = np.load(path, allow_pickle=True)
     return {k: d[k] for k in d.files}
+
+
+def source_peak_nhit(nhit: np.ndarray, bin_width: int = 10, min_frac: float = 0.1, smooth: int = 3) -> float:
+    """Position of the calibration-source peak in a hit-multiplicity spectrum.
+
+    The spectrum of a source run has the source peak plus, for a low-energy
+    source such as 68Ge (1.022 MeV, ~250 hits on the 17-inch tubes), a
+    background population piling up just above the trigger threshold that can
+    contain more events than the source peak.  The source is therefore taken
+    as the local maximum with the *largest* nhit among those reaching at least
+    ``min_frac`` of the highest bin (after a ``smooth``-bin running average);
+    for a 60Co run this is simply the main peak.
+    """
+    nhit = np.asarray(nhit)
+    nhit = nhit[nhit > 0]
+    if len(nhit) == 0:
+        return float("nan")
+    edges = np.arange(0, nhit.max() + 2 * bin_width, bin_width)
+    counts, _ = np.histogram(nhit, bins=edges)
+    hs = np.convolve(counts, np.ones(smooth) / smooth, mode="same")
+    thresh = min_frac * hs.max()
+    peaks = [k for k in range(1, len(hs) - 1) if hs[k] >= thresh and hs[k] >= hs[k - 1] and hs[k] > hs[k + 1]]
+    if not peaks:
+        peaks = [int(hs.argmax())]
+    k = max(peaks)
+    if 0 < k < len(hs) - 1:                        # parabolic refinement
+        y0, y1, y2 = hs[k - 1], hs[k], hs[k + 1]
+        den = y0 - 2 * y1 + y2
+        dk = 0.5 * (y0 - y2) / den if den != 0 else 0.0
+    else:
+        dk = 0.0
+    return float(edges[k] + bin_width * (0.5 + dk))
+
+
+def source_window(nhit: np.ndarray, lo: float = 0.8, hi: float = 1.2) -> Tuple[int, int]:
+    """``(nhit_min, nhit_max)`` window around the source peak (see :func:`source_peak_nhit`)."""
+    peak = source_peak_nhit(nhit)
+    return int(lo * peak), int(hi * peak)
+
+
+def filter_cache(cache: Dict, keep: np.ndarray) -> Dict:
+    """A shallow copy of *cache* restricted to the events with ``keep[ev] == True``
+    (the ``ev`` indices of the hits are unchanged, so ``len(events)`` stays the same)."""
+    out = dict(cache)
+    out["hits"] = cache["hits"][keep[cache["hits"]["ev"]]]
+    out["events"] = cache["events"].copy()
+    out["events"]["nhit"] = np.where(keep, cache["events"]["nhit"], 0)   # excluded events drop out of nhit windows
+    return out
+
+
+def select_source_events(cache: Dict, calib: TQCalibration, pmts: PMTTable, source_xyz: Sequence[float],
+                         v_ls: float = 17.6, nhit_window: Optional[Tuple[int, int]] = None,
+                         max_dist: float = 150.0, min_nhit_fit: int = 20) -> Dict[str, np.ndarray]:
+    """Boolean mask of the source events of a run: hit multiplicity inside
+    ``nhit_window`` (default: :func:`source_window` of the run) *and* window-fitter
+    vertex within ``max_dist`` cm of the known source position.
+
+    For a low-energy source (68Ge, 1 MeV) the multiplicity window alone keeps
+    20-40 % ambient background, which is spread over the whole detector and
+    would smear every constant derived with the vertex fixed at the source;
+    the position cut removes it (a 150 cm sphere is 1 % of the balloon volume)
+    while the vertex resolution of ~30 cm keeps essentially all source events.
+    Returns ``{"keep", "in_window", "fitted", "dist"}``."""
+    from .vertex import VertexFitter
+    nh = cache["events"]["nhit"]
+    lo, hi = nhit_window if nhit_window is not None else source_window(nh)
+    in_window = (nh >= lo) & (nh <= hi)
+    h = cache["hits"]
+    base = h["primary"] & (h["cable"] < N_ID) & np.isfinite(h["t_cfd"]) & in_window[h["ev"]]
+    t = hit_times(cache, calib); q = hit_charges(cache, calib)
+    fitter = VertexFitter(pmts, v_ls=v_ls)
+    src = np.asarray(source_xyz, dtype=float)
+    dist = np.full(len(nh), np.nan)
+    order, ks, b = _group_bounds(h["ev"][base])
+    idx_all = np.flatnonzero(base)[order]
+    for a, c in zip(b[:-1], b[1:]):
+        if c - a < min_nhit_fit:
+            continue
+        idx = idx_all[a:c]
+        r = fitter.fit(h["cable"][idx], t[idx], q[idx])
+        if r.ok:
+            dist[ks[a]] = np.linalg.norm(r.xyz - src)
+    fitted = np.isfinite(dist)
+    keep = in_window & fitted & (dist <= max_dist)
+    return {"keep": keep, "in_window": in_window, "fitted": fitted, "dist": dist}
+
+
+def peak_fit(x: np.ndarray, bin_width: float = 10.0, half_range: float = 300.0, sigma0: float = 30.0,
+             n_iter: int = 30) -> Dict[str, float]:
+    """Gaussian + flat background fit to the distribution of *x* (e.g. reconstructed z of
+    the source events).  Least squares on a histogram around the smoothed mode;
+    returns ``mu, sigma, n_peak, bkg_per_bin, bkg_frac`` (background fraction
+    within ±3 sigma) and ``n`` (entries used).  Robust against the ambient
+    background under a low-energy source peak, which biases medians and
+    inflates MAD-based widths."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) < 10:
+        return {"mu": np.nan, "sigma": np.nan, "n_peak": 0.0, "bkg_per_bin": np.nan, "bkg_frac": np.nan, "n": len(x)}
+    edges = np.arange(x.min() - bin_width, x.max() + 2 * bin_width, bin_width)
+    cnt, _ = np.histogram(x, bins=edges)
+    sm = np.convolve(cnt, np.ones(3) / 3, mode="same")
+    mode = 0.5 * (edges[sm.argmax()] + edges[sm.argmax() + 1])
+    sel = np.abs(0.5 * (edges[:-1] + edges[1:]) - mode) <= half_range
+    c = 0.5 * (edges[:-1] + edges[1:])[sel]; y = cnt[sel].astype(float)
+    # parameters: amplitude A, mu, sigma, background B
+    B = float(np.median(y[np.abs(c - mode) > 3 * sigma0])) if (np.abs(c - mode) > 3 * sigma0).sum() >= 3 else 0.0
+    p = np.array([max(y.max() - B, 1.0), mode, sigma0, B])
+    w = 1.0 / np.sqrt(np.maximum(y, 1.0))
+    for _ in range(n_iter):
+        A, mu, sg, B = p
+        g = np.exp(-0.5 * ((c - mu) / sg) ** 2)
+        f = A * g + B
+        J = np.column_stack([g, A * g * (c - mu) / sg ** 2, A * g * (c - mu) ** 2 / sg ** 3, np.ones_like(c)])
+        r = (y - f) * w
+        step, *_ = np.linalg.lstsq(J * w[:, None], r, rcond=None)
+        p_new = p + step
+        p_new[2] = np.clip(abs(p_new[2]), 0.3 * bin_width, half_range)
+        p_new[3] = max(p_new[3], 0.0); p_new[0] = max(p_new[0], 0.0)
+        if np.all(np.abs(p_new - p) <= 1e-4 * (np.abs(p) + 1e-9)):
+            p = p_new; break
+        p = p_new
+    A, mu, sg, B = p
+    n_peak = A * sg * np.sqrt(2 * np.pi) / bin_width
+    n_bkg_3s = B * 6 * sg / bin_width
+    return {"mu": float(mu), "sigma": float(sg), "n_peak": float(n_peak), "bkg_per_bin": float(B),
+            "bkg_frac": float(n_bkg_3s / max(n_bkg_3s + 0.997 * n_peak, 1e-9)), "n": int(len(x))}
 
 
 def hit_times(cache: Dict, calib: TQCalibration, key: str = "t_cfd") -> np.ndarray:
@@ -366,6 +494,8 @@ def build_time_pdf(caches: Sequence[Dict], zs: Sequence[float], calib: TQCalibra
     logp = np.empty_like(filled); dlogp = np.empty_like(filled); d2logp = np.empty_like(filled)
     for idx in np.ndindex(filled.shape[:-1]):
         y = _gauss_smooth(filled[idx], sig)
+        if y.max() <= 0:                      # no hits at all for this tube type (e.g. 20-inch tubes off in 2002)
+            y = np.full_like(y, 1.0)          # flat density: log p constant, zero derivatives
         y = y / max(y.sum() * dt, 1e-300)
         y = np.maximum(y, floor * y.max())
         lp = np.log(y)

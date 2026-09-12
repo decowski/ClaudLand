@@ -31,9 +31,39 @@ import numpy as np
 
 from .geometry import PMTTable, N_ID, N_ID17, PMT_RADIUS_CM
 
-__all__ = ["EnergyEstimator", "EnergyResult", "CO60_ENERGY_MEV"]
+__all__ = ["EnergyEstimator", "EnergyResult", "CO60_ENERGY_MEV", "SOURCE_ENERGY_MEV", "source_energy_mev"]
 
 CO60_ENERGY_MEV = 2.506   # summed gamma energy of 60Co (1.173 + 1.333 MeV)
+
+#: total gamma energy deposited by the KamLAND calibration sources (MeV), by isotope
+SOURCE_ENERGY_MEV = {
+    "60Co": CO60_ENERGY_MEV,    # 1.173 + 1.333 MeV, emitted in coincidence
+    "68Ge": 1.022,              # 68Ge -> 68Ga (beta+): two 0.511 MeV annihilation gammas
+    "65Zn": 1.1155,             # single 1.1155 MeV gamma
+}
+
+
+def source_energy_mev(run_type: str, default: float = CO60_ENERGY_MEV, unit: str = "real") -> float:
+    """Energy of the calibration source named in a run type such as ``'source-68Ge'``.
+
+    ``unit="real"``: total gamma energy (:data:`SOURCE_ENERGY_MEV`).  ``unit="visible"``:
+    the visible energy of the collaboration's E_vis/E_real tables
+    (:class:`claudland.evis.ParticleEnergy`), e.g. 2.343 MeV for ⁶⁰Co and 0.846 MeV
+    for ⁶⁸Ge, so that scales set on different sources agree.  Falls back to the
+    real energy (with a warning) when the tables are not available."""
+    if unit == "visible":
+        from .evis import ParticleEnergy
+        if ParticleEnergy.available():
+            e = ParticleEnergy.load().source_visible_energy(run_type)
+            if e is not None:
+                return e
+        else:
+            import warnings
+            warnings.warn("particle-energy tables not available; using the real source energy")
+    for iso, e in SOURCE_ENERGY_MEV.items():
+        if iso.lower() in (run_type or "").lower():
+            return e
+    return default
 
 
 @dataclass

@@ -25,6 +25,8 @@ ClaudLand/
 │   ├── vertex_ml.py         maximum-likelihood vertex fitter with empirical time densities
 │   ├── zscan.py             calibration from the z-scan: T0/Q0, light speeds, time PDFs
 │   ├── energy.py            charge-based and hit-pattern visible energy
+│   ├── evis.py              E_vis <-> E_real of gammas / electrons / positrons (KamLAND ParticleEnergy tables)
+│   ├── frames.py            loader and column description of the per-event Parquet frames
 │   └── reco.py              EventReconstructor pipeline
 ├── scripts/
 │   ├── sfdump.py            dump file structure / trigger census / waveforms
@@ -32,8 +34,12 @@ ClaudLand/
 │   ├── extract_hits.py      decode a run once into a compact hit cache (.npz)
 │   ├── zscan_calibrate.py   T0/Q0 from the centre run, light speeds and time PDFs from the scan
 │   ├── zscan_evaluate.py    bias/resolution of the fitters versus source position
+│   ├── farm.py              submit extract_hits / reco_run / spallation jobs per run to an LSF batch queue (bsub)
+│   ├── spallation.py        muons + the events that follow them: neutron-capture candidates, capture-time fit
+│   ├── reco_frames.py       every physics event of a run -> pandas frame (Parquet): vertex, energy, muon track, dt to muon
 │   ├── plot_event.py        event display (waveforms, time spectrum, hit map) → PNG
 │   └── plot_run.py          summary plots of a reconstructed run
+├── examples/                plots from the 60Co scan, the 68Ge scan (*_ge68.png) and muon runs
 ├── cache/                   hit caches, calibration and evaluation outputs (not versioned)
 ├── tests/                   unit tests (+ integration tests on run 2279 if present)
 ├── claudland.toml             where the private inputs live (edit for your machine)
@@ -109,7 +115,8 @@ then `~/.config/claudland/claudland.toml` (`claudland.config`):
 | `pmt_table` | `private/pmt_xyz.dat` | PMT coordinates, `cable x y z` in cm (Kat `pmt_xyz.cc`) |
 | `run_info` | `private/run-info.table` | the run list (`claudland.runinfo` parses it) |
 | `huffman_tables` | `private/huffman_tables.json` | code tables of the `.sfz` waveform compression (from `WFComp/trees.hh`) |
-| `data_dir` | `../Run` | raw `.sf`/`.sfz` files, searched recursively (`Config.find_run(2283)`) |
+| `particle_energy` | `private/ParticleEnergy` | `Gamma/Electron/Positron.table` of the analysis (`$KAMLAND_CONST_DIR/vf/ParticleEnergy`): E_vis/E_real versus energy |
+| `data_dir` | `../Run` | raw `.sf`/`.sfz` files, searched recursively (`Config.find_run(2283)`); several directories may be given `:`-separated |
 | `cache_dir` | `cache` | derived hit caches, fit tables, plots |
 | `tq`, `time_pdf` | `cache/calib_center.json`, `cache/timepdf.npz` | default calibration and time PDFs; the scripts use them when present |
 
@@ -345,6 +352,133 @@ result by +1 cm rms bias and the window fitter by −0.5 cm; the default stays
 at the 850 cm table because the T0 calibration absorbs the common radial
 offset.
 
+## Calibration on the ⁶⁸Ge z-scan (October/November 2002, runs 1518–1663)
+
+The same chain applied to the 1.022 MeV positron source (two 0.511 MeV
+annihilation gammas), one year before the ⁶⁰Co scan: uncompressed `.sf`
+files, 17-inch tubes only (1323 live), ~250 hits per source event.  Data:
+centre run 1518 (six sub-run files, 39 k source-trigger events), the October
+scan 1519–1537 (+6.00 m … −5.50 m in 0.25–1 m steps) and the November
+positions 1640–1647, 1661–1663 (±2, ±3.5, ±4.25, ±5.25, −5.75 m) — 31 runs.
+`examples/reco_1518_ge68.png`, `examples/zscan_eval_ge68.png`.
+
+What is different from ⁶⁰Co, and what the framework gained from it:
+
+* **Source position** is written by the shifters in many styles (`Ge68 +6.00 m`,
+  `Ge68 (-2.0 m)`, `Ge68 at +5.25`, `balloon center`); `RunHeader.source_z_cm`
+  now parses all of them.
+* **Background.**  The ⁶⁸Ge peak (≈254 hits at the centre, 224 at +5.5 m) sits
+  next to the ambient-background pile-up just above the trigger threshold
+  (≈150 hits, more events than the source), so a multiplicity window alone is
+  25–45 % background spread over the whole detector.  `zscan.source_peak_nhit`
+  takes the highest *significant* peak of the nhit spectrum; the calibration
+  additionally keeps only events whose window-fitter vertex is within 150 cm
+  of the known source position (`zscan.select_source_events`, 77 % of the
+  window events at the centre; a 150 cm sphere is 1 % of the balloon volume),
+  and the evaluation fits a Gaussian + flat background to the reconstructed
+  positions (`zscan.peak_fit`) instead of taking medians — the background
+  pulled medians by up to 40 cm and doubled MAD widths.  The +6.00 m point is
+  not usable (the peak merges with the background).
+* **Multi-file runs.**  `EventReconstructor`, `extract_hits.py` and `reco_run.py`
+  take the list of sub-run files; the calibration block is read from the first.
+* **Source energy** comes from the run type (`energy.SOURCE_ENERGY_MEV`: 2.506,
+  1.022, 1.1155 MeV for ⁶⁰Co, ⁶⁸Ge, ⁶⁵Zn) or `--energy` / `--source-energy`.
+
+Constants (`zscan_calibrate.py hits_1*.npz --center 1518`): T0 for all 2642
+live channel×ATWD (rms 5.2 ns, range −14 … +17 ns), Q0 mode 228 ADC·sample,
+light yield 0.170 p.e./MeV per 17-inch tube (225 p.e./MeV summed, 9.4 k
+centre events).  The residual-versus-path-length fit over |z| ≤ 550 cm gives
+19.26 cm/ns (scintillator) and 18.56 cm/ns (buffer oil), close to the 19.4 / 19.0
+of the 2003 scan.  With exactly these speeds, however, both likelihood
+fitters pull the source *inward* by 2 % of z (−10 cm at +5 m, +8 cm at
+−5 m); scanning the fitter speed with the densities fixed nulls the bias at
+19.6 / 18.89 cm/ns, which is what the delivered calibration uses
+(`meta.v_source` documents it, the residual-fit values are kept as
+`v_ls_residual_fit`).  Rebuilding the densities self-consistently at 19.6
+brings most of the pull back, and seven distance bins instead of four do not
+change it, so the 2 % is a property of the fitter/density pair rather than
+of the binning — left as an open point.  Energy scale from the centre run
+(`reco_run.py … --energy-scale`): factors 0.995 (charge) and 0.993 (hit
+pattern), i.e. the per-tube yields already give 1.022 MeV to 0.7 %.
+
+Evaluation, 500 source events per run, Gaussian peak fit (A = window fitter,
+single speed tuned on the scan to 19.5 cm/ns; C = time likelihood; D = joint
+time + hit-pattern likelihood):
+
+| |z| ≤ 550 cm (28 runs) | mean \|z bias\| | rms z bias | mean σ_z | mean σ_x | median ρ |
+|---|---|---|---|---|---|
+| A window fitter | 12.2 cm | 14.2 cm | 25.2 cm | 22.4 cm | 27.2 cm |
+| C likelihood, time only | **2.2 cm** | **2.7 cm** | 20.2 cm | 17.6 cm | 21.2 cm |
+| D likelihood, time + hit pattern | 4.0 cm | 4.3 cm | **19.1 cm** | **16.6 cm** | **19.9 cm** |
+
+C stays within ±5 cm from −575 to +575 cm; D is 2–3 cm more inward at
+|z| ≥ 4 m (the hit-pattern term with the centre-run light yields prefers a
+slightly smaller radius, the opposite of what it did on ⁶⁰Co).  The
+resolution of 19–20 cm at 1.02 MeV compares with 16–17 cm at 2.5 MeV with
+2.6× more hits, i.e. it scales roughly as 1/√N_hit as expected.  The joint
+fit's energy is 1.010 ± 0.015 MeV over |z| ≤ 550 cm (1.5 % rms, dropping to
+0.97 MeV at ±5.5 m where the light-collection model is least accurate) with
+a resolution of 9.8 % (hit pattern) / 10.2 % (charge); the charge estimator
+runs 2–4 % high off-centre.  At the centre (run 1518, 10.7 k events, joint
+fitter): source peak at z = +2.1 cm, σ = 18.8 / 18.3 / 18.5 cm in z / x / y,
+energy peak 1.012 MeV with σ = 9.9 %.
+
+### Cross-check on ⁶⁰Co runs of the same weeks
+
+The ⁶⁸Ge constants (T0, Q0, light yields, densities, speeds, energy scale)
+applied unchanged to the 2.5 MeV source, runs 1503/1538 (centre, the runs
+immediately before and after the ⁶⁸Ge scan) and 1500/1502 (±5.25 m), joint
+fitter, first sub-run file each (1000–1200 source events):
+
+| run | z_true | z peak − z_true | σ_z | σ_x | E_hit | E_charge |
+|---|---|---|---|---|---|---|
+| 1503 | 0 | +0.8 cm | 15.7 cm | 16.9 cm | 2.80 MeV | 2.85 MeV |
+| 1538 | 0 | +0.4 cm | 16.9 cm | 17.4 cm | 2.80 MeV | 2.85 MeV |
+| 1500 | +525 cm | −2.7 cm | 18.2 cm | 15.9 cm | 2.81 MeV | 2.84 MeV |
+| 1502 | −525 cm | +0.2 cm | 17.4 cm | 15.3 cm | 2.74 MeV | 2.81 MeV |
+
+The vertex calibration transfers to the higher energy without any bias
+(≤ 3 cm, also at ±5.25 m where the ⁶⁸Ge fit itself pulls inward) with the
+expected 16–18 cm resolution and 5 % energy resolution.  The energies in the
+table are with the scale set to the *real* ⁶⁸Ge energy (1.022 MeV): ⁶⁰Co then
+reconstructs at 2.80 / 2.85 MeV instead of 2.506, a light ratio of 2.74–2.79
+for a true energy ratio of 2.45.  This is the scintillator non-linearity
+(quenching at low energy, Čerenkov light at high energy), which the
+collaboration tabulated as E_vis/E_real versus energy for gammas, electrons
+and positrons (`$KAMLAND_CONST_DIR/vf/ParticleEnergy`, from the Monte Carlo
+fit of Detwiler §4.4.4 to the calibration sources).  `claudland.evis`
+reads these tables (natural cubic spline as in `KVFParticleEnergy`) and gives
+the visible energy of each source: 0.8456 MeV for ⁶⁸Ge (two 0.511 MeV gammas
+at E_vis/E_real = 0.827), 2.3425 MeV for ⁶⁰Co (1.173 + 1.333 MeV at 0.928 /
+0.941; Kat's `KatAngleTable` uses 2.357 for the same quantity), 1.030 MeV for
+⁶⁵Zn — a predicted ⁶⁰Co/⁶⁸Ge light ratio of 2.77, exactly the measured one.
+Since 2026-09 the energy scale is therefore set in **visible energy** by
+default (`--energy-unit visible` of `zscan_calibrate.py` / `reco_run.py`;
+`real` restores the old convention; `meta.energy_unit` records the choice,
+and `ParticleEnergy.visible_to_gamma/electron/positron` convert back).  With
+the ⁶⁸Ge scale in this convention the ⁶⁰Co scan below reconstructs at
+2.34 ± 0.02 MeV (charge) / 2.29 ± 0.02 MeV (hit pattern) for |z| ≤ 4 m: the
+two sources agree to 0.5 % with the charge estimator and to 2 % with the
+hit-pattern estimator, whose Bernoulli hit/no-hit likelihood starts to
+saturate at the 0.5 p.e./tube occupancy of a 2.5 MeV event.
+
+The full July 2002 ⁶⁰Co scan (runs 881–899, +6.00 … −5.75 m, first file
+each, farmed with `scripts/farm.py`) with the same ⁶⁸Ge constants,
+`examples/zscan_eval_co60_2002.png`:
+
+| |z| ≤ 550 cm (17 runs) | mean \|z bias\| | rms z bias | mean σ_z | mean σ_x |
+|---|---|---|---|---|
+| A window fitter (19.0 cm/ns tuned) | 4.2 cm | 5.4 cm | 20.0 cm | 18.4 cm |
+| C likelihood, time only | 2.3 cm | 2.7 cm | 16.9 cm | 15.8 cm |
+| D likelihood, time + hit pattern | **1.9 cm** | **2.2 cm** | **16.3 cm** | **15.7 cm** |
+
+D stays within ±3.6 cm from −575 to +600 cm, so the 2 % inward pull seen on
+⁶⁸Ge is specific to the 1 MeV events (≈250 hits, close to the trigger
+threshold), not to the constants.  In visible energy (see above) the ⁶⁰Co
+scan gives 2.34 MeV (charge) / 2.29 MeV (hit pattern) for |z| ≤ 4 m, falling
+by 3–5 % towards ±5.75 m where the light-collection model is least accurate;
+resolution 5.2 % / 5.6 %.
+
 ## Mechanical tolerances: what the source data can and cannot tell
 
 `scripts/zscan_survey.py` fits every inner tube's position offset dP_i and time
@@ -491,6 +625,77 @@ python3 scripts/plot_muon.py cache/muons_1467.npz --event 566 -o ev566_mu.png
 python3 scripts/plot_muon.py cache/muons_22*.npz --od-trigger -o muons_2003.png   # source runs
 ```
 
+## Spallation neutrons after muons (physics runs, October 2002)
+
+`scripts/spallation.py` scans physics runs, tags muons with the standard
+selection, fits their tracks (`claudland.muon`), and reconstructs every event
+in the 2 ms after each muon with the joint likelihood fitter; `--analyze`
+merges the outputs, fits `A e^(−t/τ) + B` to the time-since-muon distribution
+of the 2.2 MeV capture candidates (Poisson likelihood, τ profiled) and plots
+the energy spectrum, the distance of the candidates to the muon track and the
+electronics recovery.  Run on the first 30 sub-run files of runs 1545, 1549
+and 1550 (90 files, 4.6 h of data, farmed with `scripts/farm.py spallation`;
+`examples/spallation_oct2002.png`):
+
+| quantity | value |
+|---|---|
+| physics events / muon-tagged events | 500 k / 9506 (3685 of them re-triggers < 100 µs after a muon) |
+| muons through the scintillator (converged track, L_LS > 0) | 3144, rate 0.19 Hz, mean L_LS 9.2 m |
+| capture candidates 1.2–2.6 MeV, r < 6 m, 150–2000 µs after an LS muon | 53 (4 accidental) |
+| capture time (fit from 150 µs; 200, 250 µs give the same) | 280–295 ± 40–65 µs |
+| candidates per LS muon (150–2000 µs) | 0.016 |
+
+The candidates are what spallation neutrons should be: a line at 2.0–2.3 MeV
+(E_vis of the 2.22 MeV gamma is 2.19 MeV) that is absent in the late-time
+control window, and vertices within 2 m of the muon track.  Two features of
+the 2002 electronics limit the measurement, both visible in the recovery
+panels of the plot:
+
+* **The detector is blind for 100 µs after a scintillator muon.**  Between
+  2 and 100 µs the DAQ records thousands of ≤ 100-hit fragments per 1000 muons
+  (PMT afterpulses and re-triggers) and, at 2 µs, a streak of 200–500-hit
+  events — the Michel electrons of stopping muons — but not a single event
+  with ≥ 300 hits; normal events resume at exactly 100 µs.  38 % of the
+  captures (τ = 207 µs) fall into this window.
+* **Channels recover slowly afterwards.**  The multiplicity of the follow-up
+  events keeps rising until ~500 µs (front-end channels still busy with the
+  muon's waveforms), so early captures register fewer hits and reconstruct at
+  lower energy than late ones.  The selection efficiency therefore *rises*
+  with time after the muon, which stretches the fitted τ: 280–295 µs against
+  the 207.5 ± 2.8 µs of the collaboration.  Widening the energy window
+  (1.2 instead of 1.8 MeV) or starting the fit later does not remove it
+  with this sample.
+
+The same limitation explains the low yield (0.016 per muon in the window,
+against ~0.2 expected for a 9 m scintillator path).  A proper capture-time
+measurement on these runs needs either an event-by-event correction for the
+busy channels (e.g. from the channels that did return a waveform) or, more
+simply, the later data with the upgraded electronics; more October 2002 files
+only shrink the statistical error, not the bias.
+
+## Per-event frames for analysis (`scripts/reco_frames.py`, `claudland.frames`)
+
+For analyses that go over runs, `reco_frames.py` reconstructs *every* physics
+event of a run into a pandas DataFrame written as Parquet: bookkeeping
+(run, sub-run file, event, time stamp, trigger, N_sum), multiplicities and
+charges, the muon selection with the fitted track for muons (entrance, exit,
+direction, zenith angle, impact parameter, L_LS, L_BO, residual charge), the
+joint likelihood vertex and both energies for non-muons, the time since the
+previous event and since the previous muon with the distance of the vertex to
+that muon's track.  One job per four sub-run files on the batch system
+(`farm.py frames 1550 --file-range 29-32 --tag f029-032`, ≈ 65 ms per event
+plus 2 s per muon track, i.e. ~4 min per file), the frames of a run are read
+back with
+
+```python
+from claudland import frames
+df = frames.load(1550)                     # all frames of run 1550 in <cache_dir>/frames/run001550
+mu = df[df.is_muon & ~df.retrigger & df.mu_converged & (df.mu_l_ls > 0)]
+n  = df[~df.is_muon & df.vertex_ok & df.e_hit.between(1.8, 2.6) & (df.dt_muon_us < 2000)]
+```
+
+The column list is in the module docstring of `claudland.frames`.
+
 ## Speed
 
 Single core (Apple silicon), run 2279 with ~760 hits per source event, default
@@ -540,10 +745,31 @@ chimney and the bottom of the balloon as in Detwiler's Fig. 4.5.
   a proper η_i fit needs the full z-scan (Detwiler Eq. 4.9).
 * Bad-channel handling is occupancy-based only; run-dependent bad-channel tables
   from the collaboration database are not used.
-* Only the first sub-run file of each run is handled; `SFReader` reads one file
-  (chain the files yourself if needed).
+* `SFReader` reads one file; `EventReconstructor` (and `extract_hits.py` /
+  `reco_run.py`) accept the list of sub-run files of a run and read the
+  calibration block from the first one, then continue through the others.
 * MoGURA-era banks and the BWT-compressed format strings of the `SF` library are not
   implemented (never used in these files).
+
+## Batch processing (LSF)
+
+`scripts/farm.py` submits one `bsub` job per run for `extract_hits.py`
+(`extract`) or `reco_run.py` (`reco`); runs are given as numbers or ranges and
+located through `data_dir`, anything after `--` goes to the tool:
+
+```bash
+python3 scripts/farm.py extract 881-899 -o ~/cache/co60scan
+python3 scripts/farm.py reco 881-899 -o ~/cache/co60scan -- --calib ~/cache/ge68/calib_ge68_final.json \
+        --ml-pdf ~/cache/ge68/timepdf_ge68.npz --joint hit
+```
+
+Because the raw files are recalled from tape on first access, the script
+reads them one after the other on the submit host *before* submitting
+(parallel recalls from many nodes thrash the drive; `--no-stage` skips this).
+The output directory must be mounted on the batch nodes (on the Tohoku
+cluster the GPFS home, not the login node's `/cache`).  `--queue`, `-W`
+(minutes) and `-M` (MB) set queue and limits; `--dry-run` prints the
+`bsub` commands.
 
 ## License
 
