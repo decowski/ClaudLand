@@ -94,3 +94,47 @@ def test_charge_time_fitter_recovers_vertex_and_energy():
     assert r.ok
     assert np.linalg.norm(r.xyz - true) < 25.0
     assert abs(r.energy - E_true) / E_true < 0.15
+
+
+def test_source_peak_nhit_prefers_highest_significant_peak():
+    """68Ge-like spectrum: big background pile-up at ~150 hits, source peak at ~250 hits."""
+    from claudland.zscan import source_peak_nhit, source_window
+    rng = np.random.default_rng(3)
+    nh = np.concatenate([rng.normal(150, 15, 2000), rng.normal(250, 15, 900), rng.integers(300, 600, 60)])
+    peak = source_peak_nhit(nh)
+    assert 240 < peak < 260
+    lo, hi = source_window(nh)
+    assert lo < 250 < hi
+    # single-peak (60Co-like) spectrum with a small background continuum
+    co = np.concatenate([rng.normal(620, 30, 3000), rng.integers(100, 500, 300)])
+    assert 600 < source_peak_nhit(co) < 640
+
+
+def test_run_header_source_position_parsing():
+    from claudland.banks import RunHeader
+    cases = {"+3.50 m": 350.0, "Ge68 in balloon center": 0.0, "Ge68 +6.00 m": 600.0, "Ge68 (-2.0 m)": -200.0,
+             "Ge68 at +5.25": 525.0, "Ge68 at (-5.25)": -525.0, " Ge68 at 0.00 m": 0.0, "Co60 +1.50 m": 150.0,
+             "+350 cm": 350.0, "normal run": None, "co 60 run": None, "co 60 run, 20' PMTs off": None,
+             "Co-60 source - -3m": -300.0, "Co60 --5.25 m": -525.0, "source Co60 +5.25 m": 525.0}
+    for comment, expected in cases.items():
+        assert RunHeader(0, 0, 0, 0, "", "", comment).source_z_cm == expected, comment
+
+
+def test_particle_energy_tables():
+    import pytest
+    from claudland.evis import ParticleEnergy, NaturalSpline
+    from claudland import config
+    if not ParticleEnergy.available():
+        pytest.skip("private ParticleEnergy tables not available")
+    pe = ParticleEnergy.load()
+    g = pe.tables["gamma"]
+    # the spline reproduces the table nodes and the inverse undoes the forward map
+    assert np.allclose(pe.gamma_visible(g.e_real), g.e_real * g.ratio)
+    assert np.allclose(pe.visible_to_gamma(pe.gamma_visible([0.7, 1.5, 3.0])), [0.7, 1.5, 3.0], rtol=2e-3)
+    assert abs(pe.source_visible_energy("source-60Co") - 2.3425) < 0.005
+    assert abs(pe.source_visible_energy("source-68Ge") - 0.8456) < 0.002
+    assert pe.source_visible_energy("normal") is None
+    # positron table at 1.022 MeV (no kinetic energy) == two 0.511 MeV gammas
+    assert abs(pe.positron_visible(1.022) - pe.source_visible_energy("source-68Ge")) < 1e-3
+    s = NaturalSpline([0, 1, 2, 3], [0, 1, 8, 27])
+    assert abs(float(s(1.5)) - 3.375) < 0.6

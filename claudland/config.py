@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 __all__ = ["Config", "PrivateInputMissing", "get", "load", "reset", "FILENAME", "DEFAULTS"]
 
@@ -40,6 +40,7 @@ DEFAULTS: Dict[str, str] = {
     "pmt_table": "private/pmt_xyz.dat",
     "run_info": "private/run-info.table",
     "huffman_tables": "private/huffman_tables.json",
+    "particle_energy": "private/ParticleEnergy",
     "data_dir": "../Run",
     "cache_dir": "cache",
     "tq": "cache/calib_center.json",
@@ -61,16 +62,19 @@ class Config:
     pmt_table: Path
     run_info: Path
     huffman_tables: Path
-    data_dir: Path
+    particle_energy: Path           #: directory with the KamLAND E_vis/E_real tables (Gamma/Electron/Positron.table)
+    data_dir: Path                  #: first raw-data directory (see :attr:`data_dirs`)
     cache_dir: Path
     tq: Path                        #: default TQ calibration JSON
     time_pdf: Path                  #: default time-PDF file
     extra: Dict[str, str] = field(default_factory=dict)   #: any further keys of the file
+    data_dirs: List[Path] = field(default_factory=list)   #: all raw-data directories (``data_dir`` may list several, ``:``-separated)
 
     _DESCRIPTIONS = {
         "pmt_table": "PMT coordinate table (cable x y z in cm; Kat/src/pmt_xyz.cc)",
         "run_info": "run list (run-info.table)",
         "huffman_tables": "Huffman tables of the .sfz waveform compression (from WFComp/trees.hh)",
+        "particle_energy": "E_vis/E_real tables of the KamLAND analysis (vf/ParticleEnergy/*.table)",
         "data_dir": "directory with the raw .sf/.sfz run files",
         "tq": "TQ calibration JSON (made by scripts/zscan_calibrate.py)",
         "time_pdf": "time-PDF file (made by scripts/zscan_calibrate.py)",
@@ -88,11 +92,23 @@ class Config:
         return Path(p)
 
     def find_run(self, run: int, pattern: str = "run_{run:06d}_*.sf*") -> Optional[Path]:
-        """First raw-data file of *run* below :attr:`data_dir` (searched recursively), or ``None``."""
-        if not self.data_dir.exists():
-            return None
-        hits = sorted(self.data_dir.rglob(pattern.format(run=run)))
-        return hits[0] if hits else None
+        """First raw-data file of *run* below the data directories (searched recursively, in order), or ``None``."""
+        for d in (self.data_dirs or [self.data_dir]):
+            if not d.exists():
+                continue
+            hits = sorted(d.rglob(pattern.format(run=run)))
+            if hits:
+                return hits[0]
+        return None
+
+    def run_files(self, run: int, pattern: str = "run_{run:06d}_*.sf*") -> List[Path]:
+        """All sub-run files of *run* (sorted), from the first data directory that has any."""
+        for d in (self.data_dirs or [self.data_dir]):
+            if d.exists():
+                hits = sorted(d.rglob(pattern.format(run=run)))
+                if hits:
+                    return hits
+        return []
 
     def optional(self, key: str) -> Optional[Path]:
         """The path for *key* if the file exists, else ``None`` (for script defaults)."""
@@ -127,7 +143,10 @@ def load(path: Optional[os.PathLike] = None) -> Config:
                 break
     values: Dict[str, str] = {}
     if src is not None:
-        import tomllib
+        try:
+            import tomllib                      # Python >= 3.11
+        except ImportError:                     # older interpreters: the tomli backport has the same API
+            import tomli as tomllib
         with open(src, "rb") as fh:
             doc = tomllib.load(fh)
         for section in doc.values():
@@ -139,15 +158,20 @@ def load(path: Optional[os.PathLike] = None) -> Config:
     merged = dict(DEFAULTS)
     merged.update(values)
 
-    def resolve(key: str) -> Path:
-        p = Path(merged[key]).expanduser()
+    def resolve_one(value: str) -> Path:
+        p = Path(value).expanduser()
         return p if p.is_absolute() else (base / p).resolve()
 
+    def resolve(key: str) -> Path:
+        return resolve_one(merged[key].split(":")[0] if key == "data_dir" else merged[key])
+
+    data_dirs = [resolve_one(v) for v in str(merged["data_dir"]).split(":") if v.strip()]
     known = set(DEFAULTS)
     return Config(source=src, base=base, private_dir=resolve("private_dir"), pmt_table=resolve("pmt_table"),
                   run_info=resolve("run_info"), huffman_tables=resolve("huffman_tables"), data_dir=resolve("data_dir"),
+                  particle_energy=resolve("particle_energy"),
                   cache_dir=resolve("cache_dir"), tq=resolve("tq"), time_pdf=resolve("time_pdf"),
-                  extra={k: v for k, v in merged.items() if k not in known})
+                  extra={k: v for k, v in merged.items() if k not in known}, data_dirs=data_dirs)
 
 
 _CACHED: Optional[Config] = None

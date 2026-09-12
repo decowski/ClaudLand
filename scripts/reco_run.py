@@ -32,8 +32,9 @@ import numpy as np
 from claudland.reco import EventReconstructor, EVENT_DTYPE
 from claudland.calib import TQCalibration
 from claudland.vertex import VertexFitter
-from claudland.energy import EnergyEstimator, CO60_ENERGY_MEV
+from claudland.energy import EnergyEstimator, CO60_ENERGY_MEV, source_energy_mev
 from claudland.geometry import PMTTable
+from claudland.zscan import source_peak_nhit
 
 
 def summarize(tab: np.ndarray, source_z=None) -> str:
@@ -43,8 +44,9 @@ def summarize(tab: np.ndarray, source_z=None) -> str:
     lines.append(f"{len(tab)} physics events, {ok.sum()} with a converged vertex")
     if ok.sum() == 0:
         return "\n".join(lines)
-    src = ok & (tab["nhit"] > 0.75 * np.median(tab["nhit"][ok]))
-    for label, m in (("all fitted", ok), ("high-nhit (source-like)", src)):
+    peak = source_peak_nhit(tab["nhit"][ok])
+    src = ok & (tab["nhit"] > 0.8 * peak) & (tab["nhit"] < 1.2 * peak)
+    for label, m in (("all fitted", ok), ("source-like (nhit peak)", src)):
         z = tab["z"][m]; x = tab["x"][m]; y = tab["y"][m]
         rz = 1.4826 * np.median(np.abs(z - np.median(z)))
         lines.append(f"  {label:24s}: n={m.sum():5d} nhit={np.median(tab['nhit'][m]):.0f} "
@@ -60,7 +62,7 @@ def summarize(tab: np.ndarray, source_z=None) -> str:
 def main():
     """Command-line entry point."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file")
+    ap.add_argument("files", nargs="+", help="the run's files in order (only the first has the calibration block)")
     ap.add_argument("-o", "--output", help="output .npz (event table, optionally hits)")
     ap.add_argument("--csv", help="also write the event table as CSV")
     ap.add_argument("-n", "--max-events", type=int, default=None, help="stop after this many physics events")
@@ -74,7 +76,12 @@ def main():
     ap.add_argument("--q0", action="store_true", help="derive per-channel 1 p.e. charges from the hit charge spectra")
     ap.add_argument("--calib-events", type=int, default=1500, help="physics events used for T0/Q0 derivation")
     ap.add_argument("--energy-scale", action="store_true",
-                    help="set the energy scale so the source-like events peak at the 60Co energy")
+                    help="set the energy scale so the source-like events peak at the source energy")
+    ap.add_argument("--source-energy", type=float, default=None,
+                    help="source energy (MeV) for --energy-scale; default: from the RunHeader run type and --energy-unit")
+    ap.add_argument("--energy-unit", choices=["visible", "real"], default="visible",
+                    help="scale to the source's visible energy of the KamLAND E_vis/E_real tables (default; 60Co 2.343, "
+                         "68Ge 0.846 MeV) or to its real gamma energy (60Co 2.506, 68Ge 1.022 MeV)")
     ap.add_argument("--v-ls", type=float, default=None,
                     help="effective light speed in the scintillator (cm/ns); default: from the calibration, else 17.6")
     ap.add_argument("--v-bo", type=float, default=None, help="effective light speed in the buffer oil (default: from calibration or = v_ls)")
@@ -110,7 +117,7 @@ def main():
             fitter = ChargeTimeVertexFitter(pmts, pdf, v_ls, v_bo, energy_model=energy_model, charge_model=args.joint, prefit=fitter)
         else:
             fitter = MLVertexFitter(pmts, pdf, v_ls, v_bo, prefit=fitter)
-    rec = EventReconstructor(args.file, pmts=pmts, calib=calib, vertex=fitter, energy=energy_model,
+    rec = EventReconstructor(args.files, pmts=pmts, calib=calib, vertex=fitter, energy=energy_model,
                              gains=(0, 1, 2) if args.all_gains else (0,), time_key=args.time_key,
                              verbose=not args.quiet)
     rec.prepare()
@@ -144,12 +151,18 @@ def main():
                 tab[key] *= float(sc)
     if args.energy_scale and len(tab):
         ok = tab["vertex_ok"]
-        src = ok & (tab["nhit"] > 0.75 * np.median(tab["nhit"][ok]))
+        peak = source_peak_nhit(tab["nhit"][ok])
+        src = ok & (tab["nhit"] > 0.8 * peak) & (tab["nhit"] < 1.2 * peak)
+        e_src = args.source_energy
+        if e_src is None:
+            e_src = source_energy_mev(rec.run_header.run_type if rec.run_header else "", unit=args.energy_unit)
+        rec.calib.meta["source_energy_mev"] = float(e_src)
+        rec.calib.meta["energy_unit"] = args.energy_unit if args.source_energy is None else "user"
         for key in ("e_charge", "e_hit"):
             med = np.median(tab[key][src])
             if np.isfinite(med) and med > 0:
-                tab[key] *= CO60_ENERGY_MEV / med
-                rec.calib.meta[f"scale_{key}"] = float(CO60_ENERGY_MEV / med)
+                tab[key] *= e_src / med
+                rec.calib.meta[f"scale_{key}"] = float(e_src / med)
         rec.log(f"energy scale set on {src.sum()} source-like events: {rec.calib.meta}")
 
     print(summarize(tab, source_z))

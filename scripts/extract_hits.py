@@ -6,6 +6,7 @@ sampling periods, so any calibration (T0, Q0) and any vertex algorithm can be
 applied afterwards without touching the 268 MB raw file again.
 
     python scripts/extract_hits.py run_002283_000000_000001.sfz -n 2500 -o cache/hits_2283.npz
+    python scripts/extract_hits.py run_001518_00000?_00000[1-4].sf -o cache/hits_1518.npz   # several files of one run
 """
 import argparse
 import os
@@ -34,14 +35,14 @@ CACHE_EVENT_DTYPE = np.dtype([
 def main():
     """Command-line entry point."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file")
+    ap.add_argument("files", nargs="+", help="the run's files in order (only the first one has the calibration block)")
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("-n", "--max-events", type=int, default=None)
     ap.add_argument("--min-nhit", type=int, default=0, help="skip physics events with fewer ID hits")
     args = ap.parse_args()
 
     t0 = time.time()
-    rec = EventReconstructor(args.file, gains=(0,), verbose=True)
+    rec = EventReconstructor(args.files, gains=(0,), verbose=True)
     rec.prepare()
     events, hits = [], []
     n = 0
@@ -74,6 +75,7 @@ def main():
     np.savez_compressed(args.output, events=events, hits=hits, bin_ns=rec.calib.bin_ns,
                         live=rec.energy_estimator.live, run=rh.run if rh else -1,
                         source_z_cm=rh.source_z_cm if rh else np.nan, run_comment=rh.comment if rh else "",
+                        run_type=rh.run_type if rh else "",
                         pedestal_counts=rec.pedestals._n[:, :, 0])
     print(f"{args.output}: {len(events)} events, {len(hits)} hits, {time.time() - t0:.0f} s")
 

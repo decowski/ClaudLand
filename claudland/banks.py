@@ -6,6 +6,7 @@ event builder.
 """
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -100,15 +101,25 @@ class RunHeader:
 
     @property
     def source_z_cm(self) -> Optional[float]:
-        """Parse a source position such as ``'+3.50 m'`` from the comment (cm)."""
-        s = self.comment.strip().replace(" ", "")
-        for unit, scale in (("mm", 0.1), ("cm", 1.0), ("m", 100.0)):
-            if s.endswith(unit):
-                try:
-                    return float(s[:-len(unit)]) * scale
-                except ValueError:
-                    return None
-        return None
+        """Parse the source z position from the comment, in cm.
+
+        Understands the styles used by the shifters: ``'+3.50 m'``, ``'Ge68 +6.00 m'``,
+        ``'Ge68 (-2.0 m)'``, ``'Ge68 at +5.25'`` (metres implied) and any wording
+        containing ``center``/``centre`` (z = 0).  Returns ``None`` when no
+        position can be identified.
+        """
+        s = self.comment.strip()
+        if re.search(r"cent(er|re)", s, re.I):
+            return 0.0
+        # a signed decimal number, optionally followed by a unit; ignore the isotope name (Ge68, Co60, ...)
+        s = re.sub(r"\b(Ge|Co|Zn|Am|Be|Cs|Cf)\s*-?\s*\d+\b", " ", s, flags=re.I)
+        m = re.search(r"([+-]?\d+(?:\.\d+)?)\s*(mm|cm|m)?\b", s)
+        if not m:
+            return None
+        value = float(m.group(1))
+        unit = m.group(2) or "m"
+        z = value * {"mm": 0.1, "cm": 1.0, "m": 100.0}[unit]
+        return z if abs(z) <= 700.0 else None      # anything beyond the balloon is not a position
 
 
 def decode_run_header(bank: SFBank) -> RunHeader:
