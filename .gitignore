@@ -15,3 +15,6 @@ __pycache__/
 *.so
 build/
 dist/
+# downloaded papers and theses (fetch with papers/fetch_arxiv.sh, theses/fetch_theses.sh)
+papers/*.pdf
+theses/*.pdf
